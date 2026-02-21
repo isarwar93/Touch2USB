@@ -1,0 +1,31 @@
+# PlatformIO
+.pio
+.pioenvs
+.piolibdeps
+.pio/build
+.pio/libdeps
+
+# Python virtual environment
+.venv
+venv
+env
+
+# VS Code
+.vscode
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+
+.pio/
+.vscode/
+.venv/
+
+build/
