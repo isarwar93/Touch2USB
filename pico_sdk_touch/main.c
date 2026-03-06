@@ -1,4 +1,9 @@
-#define CFG_TUD_HID 1
+/*
+ * main.c — XPT2046 resistive touch to USB HID digitizer
+ *
+ * Pico SDK + TinyUSB.  CFG_TUD_HID and CFG_TUSB_RHPORT0_MODE are
+ * defined by CMakeLists.txt; do not redefine them here.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +12,6 @@
 #include "hardware/pwm.h"
 #include "hardware/uart.h"
 #include "tusb.h"
-#include "device/usbd.h"
 #include "class/hid/hid_device.h"
 #include "usb_descriptors.h"
 

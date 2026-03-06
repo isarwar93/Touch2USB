@@ -2,26 +2,30 @@
 #include "class/hid/hid_device.h"
 #include <string.h>
 
-// HID report descriptor for single-touch digitizer / touchscreen.
-//
-// Report layout (8 bytes on the wire, first byte is Report ID = 0x01):
-//   Byte 0: Report ID (0x01)
-//   Byte 1: [bit0]=Tip Switch  [bit1]=In Range  [bits2-7]=padding (const 0)
-//   Byte 2: X low byte   (0 – 799)
-//   Byte 3: X high byte
-//   Byte 4: Y low byte   (0 – 479)
-//   Byte 5: Y high byte
-//   Byte 6: Tip Pressure (0 – 255)
-//   Byte 7: Contact Count (0 or 1)
-//
-// KEY FIX: Logical Maximum for X must be 799 (SCREEN_WIDTH-1) and for Y must
-// be 479 (SCREEN_HEIGHT-1) so that the Linux kernel registers the correct
-// range in input_absinfo.  When this was 32767 the kernel told libinput/evdev
-// the axis range was 0-32767, but main.c only sent 0-799/479, so LVGL scaled
-// all touches into the top-left 2 % of the display.
-//
-// Physical Min/Max + Unit fields are added so libinput can compute pixel
-// density and correctly flag the device as INPUT_PROP_DIRECT.
+/*
+ * HID report descriptor — single-touch digitizer (USB HID Usage Tables 1.5,
+ * Digitizer page 0x0D, Touch Screen usage 0x04).
+ *
+ * Report layout (7 payload bytes following the Report ID):
+ *
+ *   Byte 0  Report ID = 0x01
+ *   Byte 1  [bit 0] Tip Switch   — 1 while finger is on surface
+ *           [bit 1] In Range    — 1 while contact is valid
+ *           [bits 2-7] padding  — constant 0
+ *   Byte 2  X coordinate, low byte   (logical range 0 – 799)
+ *   Byte 3  X coordinate, high byte
+ *   Byte 4  Y coordinate, low byte   (logical range 0 – 479)
+ *   Byte 5  Y coordinate, high byte
+ *   Byte 6  Tip pressure             (0 – 255)
+ *   Byte 7  Contact count            (0 or 1)
+ *
+ * Logical axis ranges match SCREEN_WIDTH-1 and SCREEN_HEIGHT-1 from main.c
+ * exactly.  The kernel stores these in input_absinfo; libinput and the evdev
+ * backend use them to normalise coordinates before passing them to the
+ * application.  Physical Min/Max are set equal to the logical range (units
+ * declared as "none") so that libinput classifies the device as
+ * INPUT_PROP_DIRECT without requiring udev hwdb overrides.
+ */
 const uint8_t desc_hid_report[] = {
   // ── Application collection: Touch Screen ─────────────────────────────
   0x05, 0x0D,             // Usage Page (Digitizer)
@@ -58,7 +62,7 @@ const uint8_t desc_hid_report[] = {
   0x55, 0x00,             //     Unit Exponent (0)
   0x65, 0x00,             //     Unit (None)
   0x16, 0x00, 0x00,       //     Logical Minimum (0)
-  0x26, 0x1F, 0x03,       //     Logical Maximum (799)   ← was 0xFF,0x7F=32767
+  0x26, 0x1F, 0x03,       //     Logical Maximum (799)
   0x36, 0x00, 0x00,       //     Physical Minimum (0)
   0x46, 0x1F, 0x03,       //     Physical Maximum (799)
   0x81, 0x02,             //     Input (Data, Variable, Absolute)
@@ -66,7 +70,7 @@ const uint8_t desc_hid_report[] = {
   //  Y axis – 16 bits, logical range 0-479, physical range 0-479 (pixels)
   0x09, 0x31,             //     Usage (Y)
   0x16, 0x00, 0x00,       //     Logical Minimum (0)
-  0x26, 0xDF, 0x01,       //     Logical Maximum (479)   ← was inherited 32767
+  0x26, 0xDF, 0x01,       //     Logical Maximum (479)
   0x36, 0x00, 0x00,       //     Physical Minimum (0)
   0x46, 0xDF, 0x01,       //     Physical Maximum (479)
   0x81, 0x02,             //     Input (Data, Variable, Absolute)
@@ -114,20 +118,23 @@ const tusb_desc_device_t desc_device = {
 
 // Configuration descriptor
 const uint8_t desc_configuration[] = {
-  // Config number, interface count, string index, total length, attribute, power in mA
-  TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+  // config num, interface count, string index, total length, attributes, power (mA)
+  TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN,
+                        TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
-  // Interface number, string index, protocol, report descriptor len, EP In address, size & polling interval
-  TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report), 0x81, 16, 10),
+  // interface num, string index, protocol, report descriptor len,
+  // EP In address, EP size, polling interval (ms)
+  TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_report),
+                     0x81, 16, 10),
 };
 
 // String descriptors
 const char* string_desc_arr [] = {
-  (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
-  "Private",                     // 1: Manufacturer
-  "Touchscreen",              // 2: Product
-  "123456",                      // 3: Serials, should use chip ID
-  "Touch input",                   // 4: HID
+  (const char[]) { 0x09, 0x04 }, // 0: Language — English (0x0409)
+  "Touch2USB",                    // 1: Manufacturer
+  "XPT2046 Touchscreen",          // 2: Product
+  "T2USB-001",                    // 3: Serial number
+  "Touch input",                  // 4: HID interface
 };
 
 static uint16_t _desc_str[32];

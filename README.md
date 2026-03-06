@@ -1,63 +1,91 @@
-# RP2040 SPI Resistive Touch → USB HID Interface
+# RP2040 XPT2046 Resistive Touch to USB HID
 
-This repository contains firmware for the Raspberry Pi Pico (RP2040) that converts an SPI-based resistive touch controller into a USB Human Interface Device (HID).
+Firmware for the Raspberry Pi Pico (RP2040) that bridges an XPT2046 SPI resistive touch controller to a USB HID device. Two independent firmware implementations are provided, targeting different use cases.
 
-## Project Structure
+## Repository Structure
 
-The project is organized into two firmware implementations:
+```
+Touch2USB/
+├── pico_platformio_touch_mouse/   # USB HID Mouse via PlatformIO / Arduino framework
+└── pico_sdk_touch/               # USB HID Digitizer via Pico SDK + TinyUSB
+```
 
-- **pico_platformio_touch_mouse/**: Converts touch input into a USB Mouse device using PlatformIO.
-- **pico_sdk_touch/**: Converts touch input into a USB Touch (Digitizer) device using Pico SDK.
+| Firmware | Framework | USB Class | Coordinate Mode | Host Compatibility |
+|---|---|---|---|---|
+| `pico_platformio_touch_mouse` | PlatformIO / Arduino | HID Mouse | Relative delta | Any OS with generic HID mouse |
+| `pico_sdk_touch` | Pico SDK + TinyUSB | HID Digitizer | Absolute (touchscreen) | Linux evdev / LVGL, Windows, macOS |
 
-## Features
+## Hardware
 
-- SPI communication with resistive touch controller (e.g., XPT2046)
-- USB HID device implementation
-- Mouse emulation firmware (relative movement)
-- Touch digitizer firmware (absolute coordinates)
-- PWM-controlled LED feedback with dimming effect during touch
-- UART debugging output on GPIO 0/1
-- Designed for RP2040 (Pico SDK / TinyUSB compatible)
+### Bill of Materials
 
-## Hardware Requirements
+- Raspberry Pi Pico (RP2040)
+- XPT2046 resistive touch controller module (or a display panel with an integrated XPT2046)
+- USB Micro-B cable
+- Jumper wires
 
-- Raspberry Pi Pico (RP2040 microcontroller)
-- XPT2046 resistive touch controller
-- Connecting wires
-- USB cable for programming and power
-- Optional: LED connected to GPIO 25 for visual feedback
+### Wiring
 
-### Pin Connections
+Both firmware implementations use the same physical connections.
 
-| Pico GPIO | XPT2046 Pin | Function          |
-|-----------|-------------|-------------------|
-| 18        | SCK         | SPI Clock         |
-| 19        | MOSI        | SPI Master Out    |
-| 16        | MISO        | SPI Master In     |
-| 17        | CS          | Chip Select       |
-| 20        | PENIRQ      | Touch Interrupt   |
-| 25        | -           | LED (PWM output)  |
-| 0         | -           | UART TX (debug)   |
-| 1         | -           | UART RX (debug)   |
+| Pico GPIO | XPT2046 Pin | Signal | Notes |
+|-----------|-------------|--------|-------|
+| GPIO 18 | CLK / DCLK | SPI0 SCK | |
+| GPIO 19 | DIN | SPI0 MOSI | |
+| GPIO 16 | DOUT | SPI0 MISO | |
+| GPIO 17 | CS / CSB | SPI0 CS | Active low, driven by firmware |
+| GPIO 20 | PENIRQ | Touch interrupt | Active low, internal pull-up enabled |
+| GPIO 25 | — | Onboard LED | PWM feedback, optional |
+| GPIO 0 | — | UART0 TX | Debug output at 115200 baud, optional |
+| GPIO 1 | — | UART0 RX | Not used for output; complete the pair |
 
-## Use Cases
+> The XPT2046 VCC pin accepts 2.7 V to 5.5 V. Connect to the Pico's 3.3 V output (pin 36). Connect GND to any Pico ground pin.
 
-- Custom USB touch panels
-- DIY USB touch displays
-- Embedded UI devices
-- Industrial / kiosk input systems
-- Learning USB HID implementation on RP2040
+### SPI Configuration
 
-## Getting Started
+- Controller: SPI0
+- Clock speed: 1 MHz
+- Mode: CPOL=0, CPHA=0 (Mode 0)
+- Word order: MSB first
+- ADC resolution: 12 bits
 
-Each subfolder contains its own README with detailed setup, building, and flashing instructions:
+## Touch Calibration
 
-- [pico_platformio_touch_mouse/README.md](pico_platformio_touch_mouse/README.md) - PlatformIO-based mouse implementation
-- [pico_sdk_touch/README.md](pico_sdk_touch/README.md) - Pico SDK-based digitizer implementation
+The XPT2046 returns 12-bit ADC values that must be mapped to screen coordinates. The following calibration constants were measured on a 4-wire resistive panel and are used by both firmware targets:
 
-## Configuration
+| Axis | Raw ADC Minimum | Raw ADC Maximum | Screen Range |
+|------|-----------------|-----------------|-------------|
+| X | 150 | 3784 | 0 – 799 |
+| Y | 277 | 3784 | 0 – 479 |
 
-- Touch controller: XPT2046-compatible
-- SPI speed: 1 MHz
-- Touch calibration ranges: X (150-3784), Y (277-3784)
-- Screen resolution: Configurable (default 800x480 for mouse, 32767x32767 logical max for digitizer)
+If your panel returns different ADC limits, update `X_MIN`, `X_MAX`, `Y_MIN`, and `Y_MAX` in the respective source file. To determine correct values, enable UART debug output and record the raw ADC readings at each screen corner.
+
+## Signal Processing
+
+Resistive touch panels are electrically noisy. Both implementations include noise rejection, details of which are documented in each firmware's own README. The Pico SDK digitizer implementation uses a more complete pipeline:
+
+1. **5-sample median filter** — eliminates single-sample electrical spikes before any further processing.
+2. **Exponential moving average (EMA)** — low-pass filters the mapped coordinate stream to smooth cursor motion while preserving responsiveness.
+3. **Jitter suppression threshold** — suppresses HID reports when the smoothed position has not moved meaningfully, preventing cursor trembling during a stationary hold.
+4. **Release guard timer** — debounces the PENIRQ line on lift-off to eliminate spurious pen-up events mid-drag.
+
+## Firmware Selection Guide
+
+Use `pico_platformio_touch_mouse` when:
+- The host application expects a standard USB mouse.
+- Relative movement is acceptable or preferred.
+- You want the simplest possible build environment (PlatformIO handles the toolchain).
+
+Use `pico_sdk_touch` when:
+- The host runs LVGL via the evdev or libinput backend and needs a proper touchscreen input device.
+- Absolute coordinate reporting is required (kiosk, embedded HMI, drawing tablet).
+- You need full control over the USB HID descriptor.
+
+## Detailed Documentation
+
+- [pico_platformio_touch_mouse/README.md](pico_platformio_touch_mouse/README.md)
+- [pico_sdk_touch/README.md](pico_sdk_touch/README.md)
+
+## License
+
+MIT License. See individual SDK and library licenses (Pico SDK, TinyUSB, Arduino-Pico core) for their respective terms.

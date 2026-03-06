@@ -1,115 +1,157 @@
-# USB Resistive Touch Controller for Raspberry Pi Pico
+# pico_platformio_touch_mouse
 
-This project implements a USB HID mouse controller using the Raspberry Pi Pico (RP2040) microcontroller. It reads touch coordinates from a resistive touch screen via SPI and translates them into relative mouse movements sent over USB using TinyUSB.
+USB HID Mouse firmware for the Raspberry Pi Pico (RP2040). Reads touch coordinates from an XPT2046 resistive touch controller over SPI and translates them into relative mouse movements reported over USB. Built with PlatformIO using the Arduino-Pico (earlephilhower) core, which bundles TinyUSB for USB HID support.
 
 ## Hardware Requirements
 
 - Raspberry Pi Pico (RP2040)
-- Resistive touch screen controller (e.g., XPT2046)
-- Connections:
-  - GP19: SPI MOSI (Touch TX)
-  - GP18: SPI SCK (Touch SCK)
-  - GP16: SPI MISO (Touch RX)
-  - GP17: SPI CS (Touch CS)
-  - GP20: Touch interrupt pin
-  - GP0: UART TX (for debugging, optional)
-  - GP1: UART RX (for debugging, optional)
-  - GP25: LED pin (onboard LED)
+- XPT2046 resistive touch controller (standalone module or panel-integrated)
+- USB Micro-B cable
+- Jumper wires
 
-## Software Setup
+### Pin Connections
+
+| Pico GPIO | XPT2046 Pin | Signal | Notes |
+|-----------|-------------|--------|-------|
+| GPIO 18 | CLK | SPI0 SCK | |
+| GPIO 19 | DIN | SPI0 MOSI | |
+| GPIO 16 | DOUT | SPI0 MISO | |
+| GPIO 17 | CS | SPI0 CS | Active low |
+| GPIO 20 | PENIRQ | Touch interrupt | Active low, pull-up enabled |
+| GPIO 25 | — | Onboard LED | PWM brightness feedback |
+| GPIO 0 | — | UART0 TX | Debug output at 115200 baud |
+
+Connect XPT2046 VCC to Pico 3.3 V (pin 36) and GND to any Pico ground pin.
+
+## Build Environment
 
 ### Prerequisites
 
-- Python 3.6 or later
-- Git (optional, for cloning)
+| Tool | Version | Notes |
+|------|---------|-------|
+| Python | 3.6 or later | Required for PlatformIO CLI |
+| PlatformIO Core | latest | Installed via pip |
+| platform-raspberrypi | maxgerhardt fork | Pulled automatically by PlatformIO |
+| Arduino-Pico core | earlephilhower | Pulled automatically |
 
-### Installation
+The PlatformIO environment will download the Arduino-Pico (earlephilhower) core and the ARM GCC toolchain automatically on first build. An internet connection is required for the initial setup.
 
-1. Clone or download this repository.
+### Installing PlatformIO
 
-2. Navigate to the project directory:
-   ```
-   cd pico_touch_controller
-   ```
+```bash
+pip install platformio
+```
 
-3. Create a Python virtual environment:
-   ```
-   python3 -m venv .venv
-   ```
+A virtual environment is recommended:
 
-4. Activate the virtual environment:
-   - On Linux/Mac:
-     ```
-     source .venv/bin/activate
-     ```
-   - On Windows:
-     ```
-     .venv\Scripts\activate
-     ```
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Linux / macOS
+.venv\Scripts\activate       # Windows
+pip install platformio
+```
 
-5. Install PlatformIO:
-   ```
-   pip install platformio
-   ```
+## Building
 
-## Building the Project
+From inside the `pico_platformio_touch_mouse/` directory:
 
-1. Ensure the virtual environment is activated.
+```bash
+platformio run
+```
 
-2. Build the firmware:
-   ```
-   platformio run
-   ```
+The compiled firmware will be placed at:
+```
+.pio/build/raspberry-pi-pico/firmware.uf2
+```
 
-## Uploading to Pico
+## Flashing
 
-1. Put the Pico into bootloader mode (hold BOOTSEL while plugging in).
+### Method 1 — PlatformIO upload (recommended)
 
-2. Upload the firmware:
-   ```
+1. Hold the BOOTSEL button on the Pico, then plug in the USB cable.
+2. Release BOOTSEL. The Pico will mount as a USB mass storage device named `RPI-RP2`.
+3. Run:
+   ```bash
    platformio run --target upload
    ```
+   PlatformIO will copy the UF2 to the drive and the Pico will reboot automatically.
 
-## Usage
+### Method 2 — Manual UF2 copy
 
-After uploading, the Pico will appear as a USB HID mouse device. Touching the screen will move the cursor to that position (jumping from center on first touch or after reset), and dragging will provide relative mouse movement. The position resets after 1 second of no touch.
+1. Enter bootloader mode as described above.
+2. Copy the UF2 manually:
+   ```bash
+   cp .pio/build/raspberry-pi-pico/firmware.uf2 /media/$USER/RPI-RP2/
+   ```
 
-### Configuration
+## Behaviour
 
-- Screen resolution is set to 800x480 pixels. Adjust `SCREEN_WIDTH` and `SCREEN_HEIGHT` in `src/main.cpp` if needed.
-- Mouse sensitivity can be adjusted via `MOUSE_SCALE`.
-- Touch controller commands are for XPT2046. Modify if using a different controller.
-- Touch readings are averaged over 2 samples to reduce noise.
-- Movement threshold is set to 2 pixels to reduce jitter from noise.
-- On first touch or after reset, the cursor jumps from the center of the screen to the touch position for touchscreen-like behavior.
-- Position resets after 1 second of no touch activity.
+After flashing, the Pico enumerates as a standard USB HID mouse. The host requires no drivers beyond what the OS provides natively.
 
-### Calibration
+- On first touch (or after the position has been reset), the cursor jumps to the center of the mapped screen area, then follows the finger proportionally.
+- Dragging produces relative movement deltas sent via `Mouse.move(dx, dy)`.
+- The position tracking state resets 300 ms after the finger lifts, ensuring the next touch starts cleanly.
+- The onboard LED fades in brightness while touch is held and returns to full brightness on release.
 
-The touch screen has been calibrated with the following raw value ranges:
-- X-axis: 150 to 3784
-- Y-axis: 277 to 3784
+## Signal Processing
 
-These values are used to map touch coordinates accurately to the screen resolution. If your touch screen has different ranges, update `X_MIN`, `X_MAX`, `Y_MIN`, and `Y_MAX` in `src/main.cpp`.
+| Stage | Detail |
+|-------|--------|
+| Sampling | 2 raw ADC readings per axis per cycle, averaged |
+| Jitter threshold | Movement deltas smaller than 10 px (mapped) are discarded |
+| Poll interval | 15 ms while touch is active |
+| Release debounce | State resets 300 ms after PENIRQ goes high |
 
-### Debugging
+## Calibration
 
-Raw touch values are printed over UART0 (GP0 TX, GP1 RX) at 115200 baud for debugging purposes. Connect a serial monitor to these pins to view real-time touch data in the format "X: <value>, Y: <value>".
+Calibration constants are defined in `src/main.cpp`:
 
-## Assumptions
+```cpp
+#define X_MIN   150
+#define X_MAX  3784
+#define Y_MIN   277
+#define Y_MAX  3784
+#define SCREEN_WIDTH  800
+#define SCREEN_HEIGHT 480
+```
 
-- The touch controller is XPT2046-compatible with SPI interface.
-- Touch interrupt is active low.
-- Raw touch values range from 150-3784 for X and 277-3784 for Y (12-bit ADC with offsets).
-- UART debugging is enabled on UART0 (GP0/GP1) at 115200 baud.
+To calibrate for a different panel, enable UART debug output and record the raw ADC readings at each screen corner. Update the four `_MIN` / `_MAX` constants accordingly.
+
+## Debugging
+
+UART0 outputs raw ADC readings in real time at 115200 8N1 on GPIO 0 (TX). Connect a USB-to-UART adapter or use a second Pico as a USB serial bridge.
+
+Example output:
+```
+X: 842, Y: 1203
+X: 845, Y: 1197
+```
+
+Any serial terminal will work:
+```bash
+tio /dev/ttyUSB0 -b 115200
+```
+
+## Configuration Reference
+
+| Constant | Default | Effect |
+|----------|---------|--------|
+| `SCREEN_WIDTH` | 800 | Horizontal mapping range |
+| `SCREEN_HEIGHT` | 480 | Vertical mapping range |
+| `X_MIN` / `X_MAX` | 150 / 3784 | Raw ADC calibration for X |
+| `Y_MIN` / `Y_MAX` | 277 / 3784 | Raw ADC calibration for Y |
+| `MOUSE_SCALE` | 1 | Multiplier applied to all movement deltas |
 
 ## Troubleshooting
 
-- Ensure all SPI pins are correctly connected.
-- Verify the touch controller model and adjust commands if necessary.
-- Check USB connection and device recognition on the host system.
-- For debugging, connect a serial terminal to GP0 (TX) and GP1 (RX) at 115200 baud to monitor raw touch values.
+| Symptom | Likely Cause | Resolution |
+|---------|-------------|------------|
+| Device not enumerated as mouse | Incorrect framework or build | Check `platformio.ini` board and core settings |
+| No touch response | SPI wiring error | Verify GPIO 16–19 and GPIO 17 CS connections |
+| Cursor jumps randomly | ADC noise or wrong calibration | Verify panel calibration constants via UART output |
+| Cursor drifts when idle | Jitter threshold too low | Increase the `abs(dx) >= 10` threshold in `main.cpp` |
+| UART outputs nothing | Wrong pin or baud rate | Use GPIO 0 TX only; set terminal to 115200 baud |
 
 ## License
 
-This project is provided as-is for educational and development purposes.
+MIT License. Refer to the Arduino-Pico core and TinyUSB library licenses for their respective terms.
