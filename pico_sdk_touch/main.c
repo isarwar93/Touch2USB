@@ -1,6 +1,7 @@
 #define CFG_TUD_HID 1
 
 #include <stdio.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "hardware/pwm.h"
@@ -10,60 +11,119 @@
 #include "class/hid/hid_device.h"
 #include "usb_descriptors.h"
 
-// SPI pins
+// ── Hardware pin assignments ───────────────────────────────────────────────
 #define SPI_PORT spi0
-#define PIN_SCK 18
+#define PIN_SCK  18
 #define PIN_MOSI 19
 #define PIN_MISO 16
-#define PIN_CS 17
+#define PIN_CS   17
 #define PIN_INTR 20
-#define LED_PIN 25
+#define LED_PIN  25
 
-// Touch controller commands for XPT2046
+// ── XPT2046 commands ──────────────────────────────────────────────────────
 #define CMD_READ_X 0xD0
 #define CMD_READ_Y 0x90
 
-// Screen resolution
-// #define SCREEN_WIDTH 32767
-// #define SCREEN_HEIGHT 32767
-
-#define SCREEN_WIDTH 800
+// ── Screen resolution ─────────────────────────────────────────────────────
+#define SCREEN_WIDTH  800
 #define SCREEN_HEIGHT 480
 
-// Touch raw value ranges
-#define X_MIN 150
-#define X_MAX 3784
-#define Y_MIN 277
-#define Y_MAX 3784
+// ── Touch calibration (raw ADC limits, measured empirically) ──────────────
+#define X_MIN   150
+#define X_MAX  3784
+#define Y_MIN   277
+#define Y_MAX  3784
 #define X_RANGE (X_MAX - X_MIN)
 #define Y_RANGE (Y_MAX - Y_MIN)
 
-// #define SCREEN_WIDTH 1200
-// #define SCREEN_HEIGHT 720
+// ── Noise-reduction tuning ────────────────────────────────────────────────
+//
+// MEDIAN FILTER
+//   Take NUM_SAMPLES raw readings per axis each cycle, sort them, and pick
+//   the middle value.  This rejects single-sample electrical spikes that
+//   cannot be eliminated by simple averaging.
+#define NUM_SAMPLES 5
 
-static uint16_t read_touch_axis(uint8_t cmd) {
+// EXPONENTIAL MOVING AVERAGE (EMA / low-pass filter)
+//   filtered = alpha * new_sample + (1 - alpha) * previous_filtered
+//   alpha = EMA_ALPHA_NUM / EMA_ALPHA_DEN  →  3/8 = 0.375
+//   Lower alpha  = smoother but more lag.   Higher = more responsive.
+#define EMA_ALPHA_NUM 3
+#define EMA_ALPHA_DEN 8
+
+// JITTER SUPPRESSION
+//   Only send a HID report when the smoothed coordinate has moved at least
+//   this many pixels.  Prevents the cursor trembling while the finger is
+//   held still.
+#define JITTER_THRESHOLD 12
+
+// POLLING INTERVAL (ms) while a touch is active.
+#define POLL_MS 8
+
+// RELEASE GUARD (ms)
+//   The interrupt line can briefly float high during a slow drag.  We only
+//   confirm "pen up" once it has been continuously high for this long.
+//   Eliminates spurious lift events in the middle of a drag.
+#define RELEASE_GUARD_MS 40
+
+// ─────────────────────────────────────────────────────────────────────────
+
+// Insertion-sort for small arrays (NUM_SAMPLES is only 5)
+static void sort_u16(uint16_t *arr, int n) {
+    for (int i = 1; i < n; i++) {
+        uint16_t key = arr[i];
+        int j = i - 1;
+        while (j >= 0 && arr[j] > key) { arr[j + 1] = arr[j]; j--; }
+        arr[j + 1] = key;
+    }
+}
+
+// Single 12-bit SPI read from XPT2046
+static uint16_t read_touch_axis_raw(uint8_t cmd) {
     uint8_t tx_buf[3] = {cmd, 0, 0};
     uint8_t rx_buf[3];
-
     gpio_put(PIN_CS, 0);
     spi_write_read_blocking(SPI_PORT, tx_buf, rx_buf, 3);
     gpio_put(PIN_CS, 1);
-
-    uint16_t result = ((rx_buf[1] << 8) | rx_buf[2]) >> 3; // 12-bit
-    return result;
+    return ((rx_buf[1] << 8) | rx_buf[2]) >> 3; // 12-bit result
 }
 
-int main() {
+// Median-filtered read: take NUM_SAMPLES, return the middle value
+static uint16_t read_touch_axis(uint8_t cmd) {
+    uint16_t samples[NUM_SAMPLES];
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        samples[i] = read_touch_axis_raw(cmd);
+    }
+    sort_u16(samples, NUM_SAMPLES);
+    return samples[NUM_SAMPLES / 2];
+}
+
+// EMA low-pass filter (integer arithmetic, no float needed).
+// *acc stores the running filtered value as an integer.
+// Pass reset=true on the first sample after touch-down to seed the filter.
+static uint16_t ema_filter(uint16_t new_val, int32_t *acc, bool reset) {
+    if (reset) {
+        *acc = (int32_t)new_val;
+    } else {
+        // new = (alpha_num * new_val + (den - alpha_num) * old) / den
+        *acc = (EMA_ALPHA_NUM * (int32_t)new_val
+                + (EMA_ALPHA_DEN - EMA_ALPHA_NUM) * (*acc))
+               / EMA_ALPHA_DEN;
+    }
+    return (uint16_t)*acc;
+}
+
+int main(void) {
     stdio_init_all();
 
-    // Initialize UART for debugging
+    // UART debug output
     uart_init(uart0, 115200);
     gpio_set_function(0, GPIO_FUNC_UART); // TX
     gpio_set_function(1, GPIO_FUNC_UART); // RX
 
-    // Initialize SPI
+    // SPI
     spi_init(SPI_PORT, 1000000);
-    gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
     gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
 
@@ -72,84 +132,120 @@ int main() {
     gpio_set_dir(PIN_CS, GPIO_OUT);
     gpio_put(PIN_CS, 1);
 
-    // Interrupt pin
+    // Interrupt / pen-down line (active-low, pull-up)
     gpio_init(PIN_INTR);
     gpio_set_dir(PIN_INTR, GPIO_IN);
     gpio_pull_up(PIN_INTR);
 
-    // LED pin with PWM
+    // LED on PWM
     gpio_set_function(LED_PIN, GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(LED_PIN);
     pwm_set_wrap(slice, 255);
     pwm_set_enabled(slice, true);
-    pwm_set_gpio_level(LED_PIN, 255); // Full brightness
+    pwm_set_gpio_level(LED_PIN, 255); // Full brightness at idle
 
-    // Initialize TinyUSB
+    // TinyUSB
     tusb_init();
 
-    uint64_t touch_start = 0;
-    bool touching = false;
+    bool     touching     = false;
+    uint64_t touch_start  = 0;
+    uint64_t release_time = 0;   // timestamp of first "pen-up" detection
+    int32_t  last_x = -1, last_y = -1;
+    int32_t  ema_x  =  0, ema_y  =  0;
+    bool     ema_init = false;
 
     while (true) {
         tud_task();
 
-        if (gpio_get(PIN_INTR) == 0) { // Touch detected
+        bool pen_down = (gpio_get(PIN_INTR) == 0);
+
+        if (pen_down) {
+            release_time = 0; // cancel any pending release guard
+
             if (!touching) {
-                touching = true;
+                touching   = true;
                 touch_start = time_us_64() / 1000;
-                pwm_set_gpio_level(LED_PIN, 0); // Full brightness
-                // uint16_t x_raw = read_touch_axis(CMD_READ_X);
-                // uint16_t y_raw = read_touch_axis(CMD_READ_Y);
-                // uint16_t x = (x_raw * SCREEN_WIDTH) / 4096;
-                // uint16_t y = (y_raw * SCREEN_HEIGHT) / 4096;
-                // printf("Touch: X=%u, Y=%u\n", x, y);
+                ema_init   = false;
+                last_x = last_y = -1;
+                pwm_set_gpio_level(LED_PIN, 0);
             } else {
+                // Dim LED gradually while held (mirrors pico_platformio behaviour)
                 uint64_t elapsed = (time_us_64() / 1000) - touch_start;
-                int brightness = 255 - (elapsed / 50); // Dim over ~12.75 seconds
+                int brightness = 255 - (int)(elapsed / 10);
                 if (brightness < 0) brightness = 0;
-                pwm_set_gpio_level(LED_PIN, brightness);
+                pwm_set_gpio_level(LED_PIN, (uint16_t)brightness);
             }
 
-            uint16_t x_raw = 0, y_raw = 0;
-            for (int i = 0; i < 2; i++) {
-                x_raw += read_touch_axis(CMD_READ_X);
-                y_raw += read_touch_axis(CMD_READ_Y);
-            }
-            x_raw /= 2;
-            y_raw /= 2;
+            // Step 1 – Median-filtered raw read
+            uint16_t x_raw = read_touch_axis(CMD_READ_X);
+            uint16_t y_raw = read_touch_axis(CMD_READ_Y);
 
-            // Map to absolute coordinates with calibration
-            uint16_t x = ((x_raw - X_MIN) * SCREEN_WIDTH) / X_RANGE;
-            uint16_t y = ((y_raw - Y_MIN) * SCREEN_HEIGHT) / Y_RANGE;
+            // Step 2 – Map to screen coordinates using calibration constants
+            int32_t x_mapped = ((int32_t)(x_raw - X_MIN) * SCREEN_WIDTH)  / X_RANGE;
+            int32_t y_mapped = ((int32_t)(y_raw - Y_MIN) * SCREEN_HEIGHT) / Y_RANGE;
 
             // Clamp to screen bounds
-            if (x > SCREEN_WIDTH - 1) x = SCREEN_WIDTH - 1;
-            if (y > SCREEN_HEIGHT - 1) y = SCREEN_HEIGHT - 1;
-            printf("Raw: X=%u, Y=%u | Mapped: X=%u, Y=%u\n", x_raw, y_raw, x, y);
-            // Send digitizer HID report (8 bytes total with report ID)
-            uint8_t report[8];
-            report[0] = 0x01; // Report ID
-            report[1] = 0x03; // Tip Switch (bit 0) and In Range (bit 1) both set
-            report[2] = x & 0xFF;
-            report[3] = x >> 8;
-            report[4] = y & 0xFF;
-            report[5] = y >> 8;
-            // report[6] = 0x80; // Pressure (128 = medium pressure when touching)
-            report[6] = 0xff; // Pressure (128 = medium pressure when touching)
-            report[7] = 0x01; // Contact count = 1
+            if (x_mapped < 0)                x_mapped = 0;
+            if (x_mapped > SCREEN_WIDTH  - 1) x_mapped = SCREEN_WIDTH  - 1;
+            if (y_mapped < 0)                y_mapped = 0;
+            if (y_mapped > SCREEN_HEIGHT - 1) y_mapped = SCREEN_HEIGHT - 1;
 
-            if (tud_hid_n_ready(0)) {
-                tud_hid_n_report(0, 0, report, 8);  // Report ID 0 since it's included in data
+            // Step 3 – EMA smoothing (seed on first sample after touch-down)
+            uint16_t x_s = ema_filter((uint16_t)x_mapped, &ema_x, !ema_init);
+            uint16_t y_s = ema_filter((uint16_t)y_mapped, &ema_y, !ema_init);
+            ema_init = true;
+
+            // Step 4 – Jitter suppression: only report if coordinate moved enough
+            bool moved = (last_x < 0) ||
+                         (abs((int32_t)x_s - last_x) >= JITTER_THRESHOLD) ||
+                         (abs((int32_t)y_s - last_y) >= JITTER_THRESHOLD);
+
+            if (moved) {
+                last_x = x_s;
+                last_y = y_s;
+
+                printf("Raw: X=%u Y=%u | Smooth: X=%u Y=%u\n",
+                       x_raw, y_raw, x_s, y_s);
+
+                // Send absolute digitizer HID report
+                uint8_t report[8];
+                report[0] = 0x01;      // Report ID
+                report[1] = 0x03;      // Tip Switch | In Range
+                report[2] = x_s & 0xFF;
+                report[3] = x_s >> 8;
+                report[4] = y_s & 0xFF;
+                report[5] = y_s >> 8;
+                report[6] = 0xFF;      // Pressure (full)
+                report[7] = 0x01;      // Contact count = 1
+
+                if (tud_hid_n_ready(0)) {
+                    tud_hid_n_report(0, 0, report, 8);
+                }
             }
 
-            sleep_ms(10); // Debounce
+            sleep_ms(POLL_MS);
+
         } else {
             if (touching) {
-                touching = false;
-                pwm_set_gpio_level(LED_PIN, 255); // Back to full brightness
-                // Send no touch report
-                uint8_t report[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // Report ID, tip=0, in_range=0, contact_count=0
-                tud_hid_n_report(0, 0, report, 8);
+                // Record first moment the pen left the surface
+                if (release_time == 0) {
+                    release_time = time_us_64() / 1000;
+                }
+
+                // Confirm release only after the guard period expires
+                if ((time_us_64() / 1000) - release_time >= RELEASE_GUARD_MS) {
+                    touching  = false;
+                    ema_init  = false;
+                    last_x = last_y = -1;
+                    release_time = 0;
+                    pwm_set_gpio_level(LED_PIN, 255); // Back to full brightness
+
+                    // Send pen-up report
+                    uint8_t report[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                    if (tud_hid_n_ready(0)) {
+                        tud_hid_n_report(0, 0, report, 8);
+                    }
+                }
             }
         }
     }

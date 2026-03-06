@@ -2,50 +2,96 @@
 #include "class/hid/hid_device.h"
 #include <string.h>
 
-// HID report descriptor for digitizer
+// HID report descriptor for single-touch digitizer / touchscreen.
+//
+// Report layout (8 bytes on the wire, first byte is Report ID = 0x01):
+//   Byte 0: Report ID (0x01)
+//   Byte 1: [bit0]=Tip Switch  [bit1]=In Range  [bits2-7]=padding (const 0)
+//   Byte 2: X low byte   (0 – 799)
+//   Byte 3: X high byte
+//   Byte 4: Y low byte   (0 – 479)
+//   Byte 5: Y high byte
+//   Byte 6: Tip Pressure (0 – 255)
+//   Byte 7: Contact Count (0 or 1)
+//
+// KEY FIX: Logical Maximum for X must be 799 (SCREEN_WIDTH-1) and for Y must
+// be 479 (SCREEN_HEIGHT-1) so that the Linux kernel registers the correct
+// range in input_absinfo.  When this was 32767 the kernel told libinput/evdev
+// the axis range was 0-32767, but main.c only sent 0-799/479, so LVGL scaled
+// all touches into the top-left 2 % of the display.
+//
+// Physical Min/Max + Unit fields are added so libinput can compute pixel
+// density and correctly flag the device as INPUT_PROP_DIRECT.
 const uint8_t desc_hid_report[] = {
-  0x05, 0x0D,       // Usage Page (Digitizer)
-  0x09, 0x04,       // Usage (Touch Screen)
-  0xA1, 0x01,       // Collection (Application)
-  0x85, 0x01,       // Report ID (1)
-  0x05, 0x0D,       // Usage Page (Digitizer)
-  0x09, 0x22,       // Usage (Finger)
-  0xA1, 0x02,       // Collection (Logical)
-  0x09, 0x42,       // Usage (Tip Switch)
-  0x15, 0x00,       // Logical Minimum (0)
-  0x25, 0x01,       // Logical Maximum (1)
-  0x75, 0x01,       // Report Size (1)
-  0x95, 0x01,       // Report Count (1)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0x09, 0x32,       // Usage (In Range)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0x95, 0x06,       // Report Count (6)
-  0x81, 0x03,       // Input (Const,Var,Abs)
-  0x05, 0x01,       // Usage Page (Generic Desktop)
-  0x09, 0x30,       // Usage (X)
-  0x75, 0x10,       // Report Size (16)
-  0x95, 0x01,       // Report Count (1)
-  0x16, 0x00, 0x00, // Logical Minimum (0)
-  0x26, 0xFF, 0x7F, // Logical Maximum (32767)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0x09, 0x31,       // Usage (Y)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0x05, 0x0D,       // Usage Page (Digitizer)
-  0x09, 0x30,       // Usage (Pressure)
-  0x75, 0x08,       // Report Size (8)
-  0x95, 0x01,       // Report Count (1)
-  0x15, 0x00,       // Logical Minimum (0)
-  0x25, 0xFF,       // Logical Maximum (255)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0xC0,             // End Collection
-  0x05, 0x0D,       // Usage Page (Digitizer)
-  0x09, 0x54,       // Usage (Contact Count)
-  0x75, 0x08,       // Report Size (8)
-  0x95, 0x01,       // Report Count (1)
-  0x15, 0x00,       // Logical Minimum (0)
-  0x25, 0x02,       // Logical Maximum (2)
-  0x81, 0x02,       // Input (Data,Var,Abs)
-  0xC0              // End Collection
+  // ── Application collection: Touch Screen ─────────────────────────────
+  0x05, 0x0D,             // Usage Page (Digitizer)
+  0x09, 0x04,             // Usage (Touch Screen)
+  0xA1, 0x01,             // Collection (Application)
+  0x85, 0x01,             //   Report ID (1)
+
+  // ── Logical finger contact ────────────────────────────────────────────
+  0x05, 0x0D,             //   Usage Page (Digitizer)
+  0x09, 0x22,             //   Usage (Finger)
+  0xA1, 0x02,             //   Collection (Logical)
+
+  //  Tip Switch – 1 bit
+  0x09, 0x42,             //     Usage (Tip Switch)
+  0x15, 0x00,             //     Logical Minimum (0)
+  0x25, 0x01,             //     Logical Maximum (1)
+  0x75, 0x01,             //     Report Size (1)
+  0x95, 0x01,             //     Report Count (1)
+  0x81, 0x02,             //     Input (Data, Variable, Absolute)
+
+  //  In Range – 1 bit
+  0x09, 0x32,             //     Usage (In Range)
+  0x81, 0x02,             //     Input (Data, Variable, Absolute)
+
+  //  Padding – 6 bits (fills out byte 1)
+  0x95, 0x06,             //     Report Count (6)
+  0x81, 0x03,             //     Input (Constant, Variable, Absolute)
+
+  //  X axis – 16 bits, logical range 0-799, physical range 0-799 (pixels)
+  0x05, 0x01,             //     Usage Page (Generic Desktop)
+  0x09, 0x30,             //     Usage (X)
+  0x75, 0x10,             //     Report Size (16)
+  0x95, 0x01,             //     Report Count (1)
+  0x55, 0x00,             //     Unit Exponent (0)
+  0x65, 0x00,             //     Unit (None)
+  0x16, 0x00, 0x00,       //     Logical Minimum (0)
+  0x26, 0x1F, 0x03,       //     Logical Maximum (799)   ← was 0xFF,0x7F=32767
+  0x36, 0x00, 0x00,       //     Physical Minimum (0)
+  0x46, 0x1F, 0x03,       //     Physical Maximum (799)
+  0x81, 0x02,             //     Input (Data, Variable, Absolute)
+
+  //  Y axis – 16 bits, logical range 0-479, physical range 0-479 (pixels)
+  0x09, 0x31,             //     Usage (Y)
+  0x16, 0x00, 0x00,       //     Logical Minimum (0)
+  0x26, 0xDF, 0x01,       //     Logical Maximum (479)   ← was inherited 32767
+  0x36, 0x00, 0x00,       //     Physical Minimum (0)
+  0x46, 0xDF, 0x01,       //     Physical Maximum (479)
+  0x81, 0x02,             //     Input (Data, Variable, Absolute)
+
+  //  Tip Pressure – 8 bits (0-255)
+  0x05, 0x0D,             //     Usage Page (Digitizer)
+  0x09, 0x30,             //     Usage (Tip Pressure)
+  0x75, 0x08,             //     Report Size (8)
+  0x95, 0x01,             //     Report Count (1)
+  0x15, 0x00,             //     Logical Minimum (0)
+  0x25, 0xFF,             //     Logical Maximum (255)
+  0x81, 0x02,             //     Input (Data, Variable, Absolute)
+
+  0xC0,                   //   End Collection (Finger)
+
+  // ── Contact Count – outside Finger, inside Application ───────────────
+  0x05, 0x0D,             //   Usage Page (Digitizer)
+  0x09, 0x54,             //   Usage (Contact Count)
+  0x75, 0x08,             //   Report Size (8)
+  0x95, 0x01,             //   Report Count (1)
+  0x15, 0x00,             //   Logical Minimum (0)
+  0x25, 0x01,             //   Logical Maximum (1)
+  0x81, 0x02,             //   Input (Data, Variable, Absolute)
+
+  0xC0                    // End Collection (Application)
 };
 
 // Device descriptor
